@@ -1,0 +1,37 @@
+---
+title: Máquina de estados — Pedido comercial
+---
+stateDiagram-v2
+    direction LR
+
+    [*] --> RASCUNHO: criarPedido()
+
+    state RASCUNHO {
+        [*] --> Editavel
+        Editavel: entry / habilitarEdicao()
+        Editavel: do / validarItensECondicoes()
+        Editavel: exit / congelarVersaoParaEnvio()
+    }
+
+    RASCUNHO --> EM_ANALISE: enviarParaAnalise() [pedidoValido && usuarioAutorizado] / registrarSolicitacao()
+    RASCUNHO --> RASCUNHO: salvarAlteracoes() [dadosValidos] / atualizarRascunho()
+
+    EM_ANALISE --> AGUARDANDO_APROVACAO: identificarAlcada() [exigeAprovacao] / atribuirAprovador()
+    EM_ANALISE --> APROVADO: validarPolitica() [!exigeAprovacao] / aprovarAutomaticamente()
+
+    AGUARDANDO_APROVACAO --> APROVADO: aprovarPedido() [aprovadorId != representanteId && dentroDaAlcada] / registrarDecisao()
+    AGUARDANDO_APROVACAO --> REPROVADO: reprovarPedido() [motivo != vazio] / registrarMotivo()
+    AGUARDANDO_APROVACAO --> EM_ANALISE: solicitarComplemento() [informacaoInsuficiente] / devolverParaAjuste()
+
+    REPROVADO --> RASCUNHO: corrigirPedido() [representanteAutorizado] / criarNovaVersao()
+    APROVADO --> ENVIADO_ERP: publicarIntegracao() [eventoOutboxDisponivel] / marcarIntegracaoPendente()
+    ENVIADO_ERP --> ENVIADO_ERP: falhaIntegracao() [erroTemporario] / agendarRetentativa()
+    ENVIADO_ERP --> EM_SEPARACAO: confirmarIntegracao() [erpConfirmou] / registrarCodigoERP()
+    EM_SEPARACAO --> EM_CONFERENCIA: iniciarConferencia() [itensSeparados] / registrarInicioConferencia()
+    EM_CONFERENCIA --> EXPEDIDO: confirmarConferencia() [divergencias == 0] / liberarExpedicao()
+    EM_CONFERENCIA --> EM_SEPARACAO: apontarDivergencia() [divergencias > 0] / solicitarCorrecao()
+
+    RASCUNHO --> CANCELADO: cancelarPedido() [semEnvioParaERP] / registrarCancelamento()
+    REPROVADO --> CANCELADO: cancelarPedido() [representanteSolicitou] / registrarCancelamento()
+    EXPEDIDO --> [*]
+    CANCELADO --> [*]

@@ -1,0 +1,82 @@
+---
+title: Sequência — Aprovação de pedido comercial
+---
+sequenceDiagram
+    autonumber
+    actor Rep as Representante
+    participant UI as Portal TONK (React)
+    participant API as API Comercial
+    participant Pedido as PedidoService
+    participant Preco as PricingService
+    participant Aprov as ApprovalService
+    participant DB as PostgreSQL
+    participant Outbox as OutboxWorker
+    participant ERP as Adaptador ERP
+    participant Log as Serviço de Logística
+
+    Rep->>UI: Preencher pedido
+    UI->>API: POST /pedidos (CriarPedidoDTO)
+    API->>Pedido: criarPedido(dto, usuarioId)
+    Pedido->>Preco: calcularCondicoes(dto.itens, clienteId, representanteId)
+    Preco->>DB: consultarTabelaAplicavel(...)
+    DB-->>Preco: CondicoesComerciaisDTO
+    Preco-->>Pedido: ResumoPrecificacaoDTO
+    Pedido->>DB: salvarRascunho(pedido)
+    DB-->>Pedido: PedidoDTO
+    Pedido-->>API: PedidoDTO
+    API-->>UI: 201 + PedidoDTO
+    UI-->>Rep: Exibir resumo do pedido
+
+    Rep->>UI: Enviar para análise
+    UI->>API: POST /pedidos/{id}/envio
+    API->>Pedido: enviarParaAnalise(pedidoId, usuarioId)
+    Pedido->>DB: obterPedido(pedidoId)
+    DB-->>Pedido: PedidoDTO
+
+    alt Pedido inválido ou usuário sem permissão
+        Pedido-->>API: ErroValidacaoDTO
+        API-->>UI: 400/403 + ErroValidacaoDTO
+        UI-->>Rep: Exibir pendências
+    else Pedido válido
+        Pedido->>Aprov: solicitarAprovacao(pedidoId, contexto)
+        Aprov->>DB: registrarSolicitacaoAprovacao(...)
+        DB-->>Aprov: SolicitacaoAprovacaoDTO
+        Aprov-->>Pedido: ResultadoAprovacaoDTO
+        Pedido->>DB: atualizarStatus(EM_ANALISE)
+        Pedido->>DB: gravarEventoOutbox(PedidoEnviadoParaAnalise)
+        DB-->>Pedido: ConfirmacaoPersistenciaDTO
+        Pedido-->>API: PedidoDTO
+        API-->>UI: 202 + PedidoDTO
+        UI-->>Rep: Pedido enviado para análise
+    end
+
+    Note over Aprov,DB: A análise considera alçada de desconto e impede autoaprovação.
+    Aprov->>DB: registrarDecisao(pedidoId, aprovadorId, decisao)
+    DB-->>Aprov: DecisaoAprovacaoDTO
+
+    alt Desconto exige aprovação e foi aprovado
+        Aprov->>Pedido: aprovarPedido(pedidoId, aprovadorId)
+        Pedido->>DB: atualizarStatus(APROVADO)
+        Pedido->>DB: gravarEventoOutbox(PedidoAprovado)
+        DB-->>Pedido: ConfirmacaoPersistenciaDTO
+    else Pedido reprovado
+        Aprov->>Pedido: reprovarPedido(pedidoId, aprovadorId, motivo)
+        Pedido->>DB: atualizarStatus(REPROVADO)
+        DB-->>Pedido: PedidoDTO
+    else Sem aprovação adicional necessária
+        Aprov->>Pedido: aprovarPedido(pedidoId, aprovadorSistema)
+        Pedido->>DB: atualizarStatus(APROVADO)
+        Pedido->>DB: gravarEventoOutbox(PedidoAprovado)
+        DB-->>Pedido: ConfirmacaoPersistenciaDTO
+    end
+
+    Note over Outbox,ERP: Processamento assíncrono após a transação local ser confirmada.
+    Outbox-)ERP: publicarPedidoAprovado(PedidoIntegracaoDTO)
+    ERP->>ERP: transmitirPedido(dto)
+    alt ERP confirma recebimento
+        ERP-)Log: notificarPedidoLiberado(PedidoLiberadoDTO)
+        Log->>DB: registrarEncaminhamentoLogistico(...)
+    else ERP indisponível ou rejeita
+        ERP->>DB: registrarFalhaIntegracao(FalhaIntegracaoDTO)
+        Note over ERP,DB: Evento permanece rastreável para nova tentativa.
+    end
